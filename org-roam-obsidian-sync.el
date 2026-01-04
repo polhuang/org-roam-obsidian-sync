@@ -394,12 +394,14 @@ TITLE is the note title."
   (with-temp-buffer
     (insert org-content)
     (org-mode)
-    ;; Export to markdown using ox-md with custom link transcoder
+    ;; Export to markdown using ox-md
+    ;; Set org-export-with-broken-links to allow ID links that we'll convert later
     (let ((org-export-with-toc nil)
           (org-export-with-author nil)
           (org-export-with-date nil)
           (org-export-with-title nil)
-          (org-export-with-properties nil))
+          (org-export-with-properties nil)
+          (org-export-with-broken-links t))  ; Allow broken ID links
       (org-export-as 'md nil nil t))))
 
 ;;; Link Conversion
@@ -450,7 +452,8 @@ Returns (id . file) or nil if not found."
   (with-temp-buffer
     (insert text)
     (goto-char (point-min))
-    ;; Match [[id:uuid][display]] or [[id:uuid]]
+
+    ;; First handle org-style ID links: [[id:uuid][display]] or [[id:uuid]]
     (while (re-search-forward "\\[\\[id:\\([^]]+\\)\\]\\(\\[\\([^]]+\\)\\]\\)?\\]" nil t)
       (let* ((id (match-string 1))
              (display (match-string 3))
@@ -460,6 +463,20 @@ Returns (id . file) or nil if not found."
         (if (and display (not (string= title display)))
             (replace-match (format "[[%s|%s]]" title display) nil nil)
           (replace-match (format "[[%s]]" title) nil nil))))
+
+    ;; Also handle markdown-style links that might have been produced by export
+    ;; [display](id:uuid) -> [[title|display]] or [[title]]
+    (goto-char (point-min))
+    (while (re-search-forward "\\[\\([^]]+\\)\\](id:\\([^)]+\\))" nil t)
+      (let* ((display (match-string 1))
+             (id (match-string 2))
+             (title (or (org-roam-obsidian--get-node-title-by-id id)
+                       display
+                       "unknown")))
+        (if (string= title display)
+            (replace-match (format "[[%s]]" title) nil nil)
+          (replace-match (format "[[%s|%s]]" title display) nil nil))))
+
     (buffer-string)))
 
 ;;; ID Management
@@ -508,6 +525,415 @@ Returns the ID."
           (save-buffer)))
       (kill-buffer))
     id))
+
+;;; Sync Engine - File Pair Synchronization
+
+(defun org-roam-obsidian--sync-org-to-md (org-file md-file)
+  "Sync ORG-FILE to MD-FILE.
+Returns \\='synced on success."
+  (let* ((org-content (with-temp-buffer
+                        (insert-file-contents org-file)
+                        (buffer-string)))
+         (org-id (org-roam-obsidian--get-or-create-id org-file))
+         (md-content (org-roam-obsidian--org-to-md org-content))
+         ;; Convert ID links to wikilinks
+         (md-content-final (org-roam-obsidian--convert-id-links-to-wikilinks md-content)))
+    (with-temp-file md-file
+      (insert md-content-final))
+    (org-roam-obsidian--update-sync-time org-id)
+    'synced))
+
+(defun org-roam-obsidian--sync-md-to-org (md-file org-file)
+  "Sync MD-FILE to ORG-FILE.
+Returns \\='synced on success."
+  (let* ((md-content (with-temp-buffer
+                       (insert-file-contents md-file)
+                       (buffer-string)))
+         (org-content-base (org-roam-obsidian--md-to-org md-content))
+         ;; Convert wikilinks to ID links
+         (org-content (org-roam-obsidian--convert-wikilinks-to-id org-content-base))
+         (org-id (if (file-exists-p org-file)
+                     (org-roam-obsidian--get-or-create-id org-file)
+                   (org-id-new)))
+         (title (org-roam-obsidian--extract-title-from-md md-file)))
+    ;; Ensure ID property in org content
+    (with-temp-file org-file
+      (insert ":PROPERTIES:\n")
+      (insert (format ":ID:       %s\n" org-id))
+      (insert ":END:\n")
+      (insert (format "#+title: %s\n\n" title))
+      (insert org-content))
+    (org-roam-obsidian--update-sync-time org-id)
+    ;; Update org-roam database
+    (when (fboundp 'org-roam-db-update-file)
+      (org-roam-db-update-file org-file))
+    'synced))
+
+(defun org-roam-obsidian--sync-file-pair (org-file md-file org-id)
+  "Sync a single file pair ORG-FILE and MD-FILE identified by ORG-ID.
+Returns \\='synced, \\='conflict, or \\='unchanged."
+  (let* ((org-mtime (file-attribute-modification-time
+                     (file-attributes org-file)))
+         (md-mtime (file-attribute-modification-time
+                    (file-attributes md-file)))
+         (last-sync (org-roam-obsidian--get-last-sync-time org-id))
+         (org-modified (time-less-p last-sync org-mtime))
+         (md-modified (time-less-p last-sync md-mtime)))
+
+    (cond
+     ;; Both modified - conflict!
+     ((and org-modified md-modified)
+      (org-roam-obsidian--handle-conflict org-file md-file org-mtime md-mtime))
+
+     ;; Only org modified - sync org -> md
+     (org-modified
+      (message "Syncing %s -> %s" (file-name-nondirectory org-file)
+               (file-name-nondirectory md-file))
+      (org-roam-obsidian--sync-org-to-md org-file md-file))
+
+     ;; Only md modified - sync md -> org
+     (md-modified
+      (message "Syncing %s -> %s" (file-name-nondirectory md-file)
+               (file-name-nondirectory org-file))
+      (org-roam-obsidian--sync-md-to-org md-file org-file))
+
+     ;; Neither modified
+     (t 'unchanged))))
+
+;;; Conflict Handling
+
+(defun org-roam-obsidian--handle-conflict (org-file md-file org-mtime md-mtime)
+  "Handle conflict when both ORG-FILE and MD-FILE modified.
+ORG-MTIME and MD-MTIME are the modification times.
+Resolution based on `org-roam-obsidian-conflict-resolution'."
+  (pcase org-roam-obsidian-conflict-resolution
+    ('prompt
+     (org-roam-obsidian--prompt-conflict-resolution
+      org-file md-file org-mtime md-mtime))
+
+    ('newer
+     (if (time-less-p org-mtime md-mtime)
+         (org-roam-obsidian--sync-md-to-org md-file org-file)
+       (org-roam-obsidian--sync-org-to-md org-file md-file)))
+
+    ('org-roam
+     (org-roam-obsidian--sync-org-to-md org-file md-file))
+
+    ('obsidian
+     (org-roam-obsidian--sync-md-to-org md-file org-file))))
+
+(defun org-roam-obsidian--prompt-conflict-resolution (org-file md-file org-mtime md-mtime)
+  "Prompt user to resolve conflict between ORG-FILE and MD-FILE.
+ORG-MTIME and MD-MTIME are the modification times."
+  (let ((choice (read-multiple-choice
+                 (format "Conflict: %s\nOrg: %s\nMD:  %s\nWhich to keep?"
+                         (file-name-nondirectory org-file)
+                         (format-time-string "%Y-%m-%d %H:%M:%S" org-mtime)
+                         (format-time-string "%Y-%m-%d %H:%M:%S" md-mtime))
+                 '((?o "org-roam" "Keep org-roam version")
+                   (?m "markdown" "Keep Obsidian version")
+                   (?s "skip" "Skip this file")))))
+    (pcase (car choice)
+      (?o (org-roam-obsidian--sync-org-to-md org-file md-file))
+      (?m (org-roam-obsidian--sync-md-to-org md-file org-file))
+      (?s 'skipped))))
+
+;;; New Files Handling
+
+(defun org-roam-obsidian--find-md-by-title (title md-files)
+  "Find markdown file in MD-FILES matching TITLE (case-insensitive)."
+  (cl-find-if
+   (lambda (md-file)
+     (string= (downcase title)
+              (downcase (org-roam-obsidian--extract-title-from-md md-file))))
+   md-files))
+
+(defun org-roam-obsidian--handle-new-org-file (org-file md-files)
+  "Handle new ORG-FILE - create corresponding markdown file.
+MD-FILES is list of existing markdown files for matching."
+  (let* ((title (org-roam-obsidian--extract-title-from-org org-file))
+         (org-id (org-roam-obsidian--ensure-id-in-org-file org-file))
+         (md-filename (org-roam-obsidian--generate-md-filename title))
+         (md-file (expand-file-name md-filename org-roam-obsidian-vault-path)))
+
+    ;; Check if markdown file with this title already exists
+    (if-let ((existing-md (org-roam-obsidian--find-md-by-title title md-files)))
+        ;; Match found - create mapping instead of new file
+        (progn
+          (message "Matched existing: %s <-> %s"
+                   (file-name-nondirectory org-file)
+                   (file-name-nondirectory existing-md))
+          (org-roam-obsidian--add-mapping org-file existing-md org-id title))
+      ;; No match - create new markdown file
+      (message "Creating new markdown: %s" (file-name-nondirectory md-file))
+      (org-roam-obsidian--sync-org-to-md org-file md-file)
+      (org-roam-obsidian--add-mapping org-file md-file org-id title))))
+
+(defun org-roam-obsidian--handle-new-md-file (md-file org-files)
+  "Handle new MD-FILE - create corresponding org file.
+ORG-FILES is list of existing org files for matching."
+  (let* ((title (org-roam-obsidian--extract-title-from-md md-file))
+         (org-filename (org-roam-obsidian--generate-org-filename title))
+         (org-file (expand-file-name org-filename org-roam-obsidian-roam-path)))
+
+    ;; Check if org file with this title already exists
+    (if-let ((existing-org (cl-find-if
+                           (lambda (f)
+                             (string= (downcase title)
+                                     (downcase (org-roam-obsidian--extract-title-from-org f))))
+                           org-files)))
+        ;; Match found - create mapping instead of new file
+        (let ((org-id (org-roam-obsidian--ensure-id-in-org-file existing-org)))
+          (message "Matched existing: %s <-> %s"
+                   (file-name-nondirectory md-file)
+                   (file-name-nondirectory existing-org))
+          (org-roam-obsidian--add-mapping existing-org md-file org-id title))
+      ;; No match - create new org file
+      (message "Creating new org: %s" (file-name-nondirectory org-file))
+      (org-roam-obsidian--sync-md-to-org md-file org-file)
+      (let ((org-id (org-roam-obsidian--get-or-create-id org-file)))
+        (org-roam-obsidian--add-mapping org-file md-file org-id title)))))
+
+(defun org-roam-obsidian--sync-new-files (org-files md-files)
+  "Process files in ORG-FILES and MD-FILES that don't have mappings yet."
+  (let ((mapped-org (org-roam-obsidian--get-all-mapped-org-files))
+        (mapped-md (org-roam-obsidian--get-all-mapped-md-files)))
+
+    ;; Process unmapped org files
+    (dolist (org-file org-files)
+      (unless (or (member org-file mapped-org)
+                  (org-roam-obsidian--should-exclude-file org-file))
+        (org-roam-obsidian--handle-new-org-file org-file md-files)))
+
+    ;; Process unmapped md files
+    (dolist (md-file md-files)
+      (unless (or (member md-file mapped-md)
+                  (org-roam-obsidian--should-exclude-file md-file))
+        (org-roam-obsidian--handle-new-md-file md-file org-files)))))
+
+;;; Main Sync Function
+
+;;;###autoload
+(defun org-roam-obsidian-sync ()
+  "Main sync function - bidirectional sync between org-roam and Obsidian."
+  (interactive)
+  (let ((org-files (org-roam-obsidian--list-org-files))
+        (md-files (org-roam-obsidian--list-md-files))
+        (sync-count 0)
+        (conflict-count 0)
+        (new-count 0)
+        (unchanged-count 0))
+
+    (message "Starting org-roam <-> Obsidian sync...")
+
+    ;; Load existing mappings
+    (org-roam-obsidian--load-mappings)
+
+    ;; Process mapped files
+    (dolist (mapping (org-roam-obsidian--get-all-mappings))
+      (let* ((org-id (alist-get 'org-id mapping))
+             (org-file (alist-get 'org-file mapping))
+             (md-file (alist-get 'md-file mapping))
+             (org-exists (file-exists-p org-file))
+             (md-exists (file-exists-p md-file)))
+
+        (cond
+         ;; Both exist - check for updates
+         ((and org-exists md-exists)
+          (let ((result (org-roam-obsidian--sync-file-pair org-file md-file org-id)))
+            (pcase result
+              ('synced (cl-incf sync-count))
+              ('conflict (cl-incf conflict-count))
+              ('unchanged (cl-incf unchanged-count)))))
+
+         ;; Only org exists - md was deleted
+         (org-exists
+          (when (yes-or-no-p
+                 (format "Markdown deleted: %s\nDelete org file too? "
+                         (file-name-nondirectory md-file)))
+            (delete-file org-file)
+            (org-roam-obsidian--remove-mapping org-id)))
+
+         ;; Only md exists - org was deleted
+         (md-exists
+          (when (yes-or-no-p
+                 (format "Org deleted: %s\nDelete markdown file too? "
+                         (file-name-nondirectory org-file)))
+            (delete-file md-file)
+            (org-roam-obsidian--remove-mapping org-id)))
+
+         ;; Both deleted - remove mapping
+         (t
+          (org-roam-obsidian--remove-mapping org-id)))))
+
+    ;; Process unmapped files (new files)
+    (org-roam-obsidian--sync-new-files org-files md-files)
+
+    ;; Save updated mappings
+    (org-roam-obsidian--save-mappings)
+
+    (message "Sync complete: %d synced, %d conflicts, %d unchanged"
+             sync-count conflict-count unchanged-count)))
+
+;;; Interactive Commands
+
+;;;###autoload
+(defun org-roam-obsidian-sync-current-file ()
+  "Sync only the current file."
+  (interactive)
+  (let ((file (buffer-file-name)))
+    (unless file
+      (user-error "Current buffer is not visiting a file"))
+
+    (org-roam-obsidian--load-mappings)
+
+    (cond
+     ;; In org-roam directory
+     ((string-prefix-p (expand-file-name org-roam-obsidian-roam-path) file)
+      (let* ((org-id (org-roam-obsidian--ensure-id-in-org-file file))
+             (mapping (org-roam-obsidian--get-mapping-by-id org-id)))
+        (if mapping
+            (let ((md-file (alist-get 'md-file mapping)))
+              (org-roam-obsidian--sync-org-to-md file md-file)
+              (org-roam-obsidian--save-mappings)
+              (message "Synced to %s" (file-name-nondirectory md-file)))
+          (message "No mapping found. Run full sync to create mapping."))))
+
+     ;; In Obsidian directory
+     ((string-prefix-p (expand-file-name org-roam-obsidian-vault-path) file)
+      (let ((org-id (org-roam-obsidian--get-mapping-by-md-file file)))
+        (if org-id
+            (let* ((mapping (org-roam-obsidian--get-mapping-by-id org-id))
+                   (org-file (alist-get 'org-file mapping)))
+              (org-roam-obsidian--sync-md-to-org file org-file)
+              (org-roam-obsidian--save-mappings)
+              (message "Synced to %s" (file-name-nondirectory org-file)))
+          (message "No mapping found. Run full sync to create mapping."))))
+
+     (t (user-error "Current file not in org-roam or Obsidian directory")))))
+
+;;;###autoload
+(defun org-roam-obsidian-view-mappings ()
+  "Display current file mappings in a buffer."
+  (interactive)
+  (org-roam-obsidian--load-mappings)
+  (let ((buf (get-buffer-create "*Org-Roam Obsidian Mappings*")))
+    (with-current-buffer buf
+      (erase-buffer)
+      (org-mode)
+      (insert "* Org-Roam <-> Obsidian Mappings\n\n")
+      (let ((mappings (org-roam-obsidian--get-all-mappings)))
+        (if (null mappings)
+            (insert "No mappings found. Run sync to create mappings.\n")
+          (dolist (mapping mappings)
+            (insert (format "** %s\n" (alist-get 'title mapping)))
+            (insert (format "   - Org: %s\n" (alist-get 'org-file mapping)))
+            (insert (format "   - MD:  %s\n" (alist-get 'md-file mapping)))
+            (insert (format "   - ID:  %s\n\n" (alist-get 'org-id mapping)))))))
+    (switch-to-buffer buf)))
+
+;;;###autoload
+(defun org-roam-obsidian-reset-mappings ()
+  "Clear all mappings and rescan directories."
+  (interactive)
+  (when (yes-or-no-p "Really reset all mappings? ")
+    (clrhash org-roam-obsidian--file-map)
+    (clrhash org-roam-obsidian--reverse-map)
+    (org-roam-obsidian--save-mappings)
+    (message "Mappings reset. Run sync to rebuild.")))
+
+;;; Auto-Save Mode
+
+(defun org-roam-obsidian--enable-save-hook ()
+  "Enable sync on save for files in sync directories."
+  (unless org-roam-obsidian--save-hook-enabled
+    (add-hook 'after-save-hook
+              #'org-roam-obsidian--after-save-function)
+    (setq org-roam-obsidian--save-hook-enabled t)))
+
+(defun org-roam-obsidian--disable-save-hook ()
+  "Disable sync on save."
+  (when org-roam-obsidian--save-hook-enabled
+    (remove-hook 'after-save-hook
+                 #'org-roam-obsidian--after-save-function)
+    (setq org-roam-obsidian--save-hook-enabled nil)))
+
+(defun org-roam-obsidian--after-save-function ()
+  "Hook function to sync file after save."
+  (when (and (buffer-file-name)
+             (or (string-prefix-p (expand-file-name org-roam-obsidian-roam-path)
+                                 (buffer-file-name))
+                 (string-prefix-p (expand-file-name org-roam-obsidian-vault-path)
+                                 (buffer-file-name))))
+    (run-with-idle-timer 0.5 nil #'org-roam-obsidian-sync-current-file)))
+
+;;; Periodic Sync Mode
+
+(defun org-roam-obsidian--start-timer ()
+  "Start periodic sync timer."
+  (org-roam-obsidian--stop-timer)
+  (setq org-roam-obsidian--timer
+        (run-with-timer org-roam-obsidian-sync-interval
+                       org-roam-obsidian-sync-interval
+                       #'org-roam-obsidian--timer-function)))
+
+(defun org-roam-obsidian--stop-timer ()
+  "Stop periodic sync timer."
+  (when org-roam-obsidian--timer
+    (cancel-timer org-roam-obsidian--timer)
+    (setq org-roam-obsidian--timer nil)))
+
+(defun org-roam-obsidian--timer-function ()
+  "Function called by periodic sync timer."
+  (condition-case err
+      (org-roam-obsidian-sync)
+    (error
+     (message "Org-roam-Obsidian sync error: %s" (error-message-string err)))))
+
+(defun org-roam-obsidian--update-sync-mode ()
+  "Update sync mode based on current setting."
+  (pcase org-roam-obsidian-sync-mode-type
+    ('manual
+     (org-roam-obsidian--disable-save-hook)
+     (org-roam-obsidian--stop-timer))
+
+    ('on-save
+     (org-roam-obsidian--enable-save-hook)
+     (org-roam-obsidian--stop-timer))
+
+    ('periodic
+     (org-roam-obsidian--disable-save-hook)
+     (org-roam-obsidian--start-timer))))
+
+;;;###autoload
+(defun org-roam-obsidian-toggle-sync-mode ()
+  "Toggle between sync modes."
+  (interactive)
+  (setq org-roam-obsidian-sync-mode-type
+        (pcase org-roam-obsidian-sync-mode-type
+          ('manual 'on-save)
+          ('on-save 'periodic)
+          ('periodic 'manual)))
+  (org-roam-obsidian--update-sync-mode)
+  (message "Sync mode: %s" org-roam-obsidian-sync-mode-type))
+
+;;; Minor Mode
+
+;;;###autoload
+(define-minor-mode org-roam-obsidian-sync-mode
+  "Minor mode for bidirectional sync between org-roam and Obsidian."
+  :global t
+  :lighter " OR-Sync"
+  :group 'org-roam-obsidian-sync
+  (if org-roam-obsidian-sync-mode
+      (progn
+        (org-roam-obsidian--load-mappings)
+        (org-roam-obsidian--update-sync-mode)
+        (message "Org-roam-Obsidian sync mode enabled (%s)"
+                 org-roam-obsidian-sync-mode-type))
+    (org-roam-obsidian--disable-save-hook)
+    (org-roam-obsidian--stop-timer)
+    (message "Org-roam-Obsidian sync mode disabled")))
 
 (provide 'org-roam-obsidian-sync)
 ;;; org-roam-obsidian-sync.el ends here
