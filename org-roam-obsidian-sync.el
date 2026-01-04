@@ -315,6 +315,78 @@ TITLE is the note title."
           (match-string-no-properties 1))
         (file-name-base md-file))))
 
+;;; Format Conversion - Markdown to Org
+
+(defun org-roam-obsidian--md-to-org (md-content)
+  "Convert markdown string MD-CONTENT to org-mode string."
+  (with-temp-buffer
+    (insert md-content)
+    (goto-char (point-min))
+
+    ;; Convert headers (must be done first, line by line)
+    (org-roam-obsidian--convert-md-headers)
+
+    ;; Convert code blocks
+    (goto-char (point-min))
+    (org-roam-obsidian--convert-md-code-blocks)
+
+    ;; Convert images ![alt](path) -> [[file:path]]
+    (goto-char (point-min))
+    (while (re-search-forward "!\\[\\([^]]*\\)\\](\\([^)]+\\))" nil t)
+      (replace-match "[[file:\\2][\\1]]" nil nil))
+
+    ;; Convert bold/italic formatting
+    (goto-char (point-min))
+    (org-roam-obsidian--convert-md-formatting)
+
+    ;; Convert regular markdown links [text](url) -> [[url][text]]
+    (goto-char (point-min))
+    (while (re-search-forward "\\[\\([^]]+\\)\\](\\([^)]+\\))" nil t)
+      (let ((text (match-string 1))
+            (url (match-string 2)))
+        (replace-match (format "[[%s][%s]]" url text) nil nil)))
+
+    (buffer-string)))
+
+(defun org-roam-obsidian--convert-md-headers ()
+  "Convert markdown headers (# ##) to org headers (* **) in current buffer."
+  (goto-char (point-min))
+  (while (re-search-forward "^\\(#+\\) " nil t)
+    (let ((level (length (match-string 1))))
+      (replace-match (concat (make-string level ?*) " ") nil nil))))
+
+(defun org-roam-obsidian--convert-md-code-blocks ()
+  "Convert markdown code blocks to org source blocks in current buffer."
+  (goto-char (point-min))
+  (while (re-search-forward "^```\\([a-z]*\\)\n" nil t)
+    (let ((lang (match-string 1)))
+      (replace-match (format "#+begin_src %s\n" (if (string-empty-p lang) "" lang)) nil nil)
+      (when (re-search-forward "^```$" nil t)
+        (replace-match "#+end_src" nil nil)))))
+
+(defun org-roam-obsidian--convert-md-formatting ()
+  "Convert markdown bold/italic to org format in current buffer."
+  ;; Convert bold: **text** or __text__ -> *text*
+  ;; Need to be careful with nested formatting
+  (goto-char (point-min))
+  (while (re-search-forward "\\*\\*\\([^*]+?\\)\\*\\*" nil t)
+    (replace-match "*\\1*" nil nil))
+  (goto-char (point-min))
+  (while (re-search-forward "__\\([^_]+?\\)__" nil t)
+    (replace-match "*\\1*" nil nil))
+
+  ;; Convert italic: *text* or _text_ -> /text/
+  ;; This is tricky because org uses * for bold and * for headers
+  ;; We need to be careful not to match headers or our just-converted bold
+  (goto-char (point-min))
+  (while (re-search-forward "\\(?:^\\|[^*]\\)\\(\\*\\)\\([^*\n]+?\\)\\(\\*\\)\\(?:[^*]\\|$\\)" nil t)
+    (replace-match "/\\2/" nil nil nil 2)
+    (replace-match "" nil nil nil 1)
+    (replace-match "" nil nil nil 3))
+  (goto-char (point-min))
+  (while (re-search-forward "\\b_\\([^_\n]+?\\)_\\b" nil t)
+    (replace-match "/\\1/" nil nil)))
+
 ;;; ID Management
 
 (defun org-roam-obsidian--get-or-create-id (org-file)
