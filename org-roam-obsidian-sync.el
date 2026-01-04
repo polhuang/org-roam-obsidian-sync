@@ -126,6 +126,17 @@ Options:
   :type '(repeat regexp)
   :group 'org-roam-obsidian-sync)
 
+;;;; Dailies Options
+
+(defcustom org-roam-obsidian-dailies-folder "daily"
+  "Subdirectory name for daily notes in both org-roam and Obsidian.
+Daily notes use special sync behavior:
+- Filename format: YYYY-MM-DD.org / YYYY-MM-DD.md
+- Headings are appended and sorted by time
+- Heading format: * H:MM am/pm (org) or ## H:MM am/pm (markdown)"
+  :type 'string
+  :group 'org-roam-obsidian-sync)
+
 ;;; Internal Variables
 
 (defvar org-roam-obsidian--file-map (make-hash-table :test 'equal)
@@ -517,6 +528,182 @@ Returns (id . file) or nil if not found."
 
     (buffer-string)))
 
+;;; Dailies Support
+
+(defun org-roam-obsidian--is-daily-file (file)
+  "Check if FILE is in the dailies folder."
+  (let* ((dailies-folder (file-name-as-directory org-roam-obsidian-dailies-folder))
+         (roam-dailies (expand-file-name dailies-folder org-roam-obsidian-roam-path))
+         (obsidian-dailies (expand-file-name dailies-folder org-roam-obsidian-vault-path)))
+    (or (string-prefix-p roam-dailies (expand-file-name file))
+        (string-prefix-p obsidian-dailies (expand-file-name file)))))
+
+(defun org-roam-obsidian--parse-time-heading (heading)
+  "Parse time from HEADING in format 'H:MM am/pm' or 'HH:MM am/pm'.
+Returns minutes since midnight for sorting, or nil if no valid time found."
+  (when (string-match "\\([0-9]+\\):\\([0-9]+\\) *\\(am\\|pm\\)" heading)
+    (let* ((hour (string-to-number (match-string 1 heading)))
+           (minute (string-to-number (match-string 2 heading)))
+           (ampm (match-string 3 heading))
+           ;; Convert to 24-hour format
+           (hour24 (cond
+                    ((and (string= ampm "am") (= hour 12)) 0)
+                    ((and (string= ampm "pm") (/= hour 12)) (+ hour 12))
+                    (t hour))))
+      (+ (* hour24 60) minute))))
+
+(defun org-roam-obsidian--extract-org-headings (content)
+  "Extract top-level headings from org CONTENT.
+Returns list of (time-minutes . full-heading-text) pairs."
+  (let ((headings '()))
+    (with-temp-buffer
+      (insert content)
+      (goto-char (point-min))
+      (while (re-search-forward "^\\*\\{1\\} \\(.*\\)$" nil t)
+        (let* ((heading-start (match-beginning 0))
+               (heading-title (match-string 1))
+               (time-value (org-roam-obsidian--parse-time-heading heading-title))
+               (next-heading (save-excursion
+                              (if (re-search-forward "^\\*\\{1\\} " nil t)
+                                  (match-beginning 0)
+                                (point-max))))
+               (heading-content (buffer-substring heading-start next-heading)))
+          (push (cons time-value heading-content) headings))))
+    (nreverse headings)))
+
+(defun org-roam-obsidian--extract-md-headings (content)
+  "Extract H2 headings from markdown CONTENT.
+Returns list of (time-minutes . full-heading-text) pairs."
+  (let ((headings '()))
+    (with-temp-buffer
+      (insert content)
+      (goto-char (point-min))
+      (while (re-search-forward "^## \\(.*\\)$" nil t)
+        (let* ((heading-start (match-beginning 0))
+               (heading-title (match-string 1))
+               (time-value (org-roam-obsidian--parse-time-heading heading-title))
+               (next-heading (save-excursion
+                              (if (re-search-forward "^## " nil t)
+                                  (match-beginning 0)
+                                (point-max))))
+               (heading-content (buffer-substring heading-start next-heading)))
+          (push (cons time-value heading-content) headings))))
+    (nreverse headings)))
+
+(defun org-roam-obsidian--sort-headings-by-time (headings)
+  "Sort HEADINGS list by time value.
+HEADINGS is a list of (time-minutes . heading-text) pairs."
+  (sort headings
+        (lambda (a b)
+          (let ((time-a (car a))
+                (time-b (car b)))
+            (cond
+             ;; Both have times - sort by time
+             ((and time-a time-b) (< time-a time-b))
+             ;; Only a has time - a comes first
+             (time-a t)
+             ;; Only b has time - b comes first
+             (time-b nil)
+             ;; Neither has time - preserve order
+             (t t))))))
+
+(defun org-roam-obsidian--merge-daily-org-content (existing-content new-content)
+  "Merge NEW-CONTENT into EXISTING-CONTENT for org daily notes.
+Extracts headings, merges them, and sorts by time."
+  (let* ((existing-headings (org-roam-obsidian--extract-org-headings existing-content))
+         (new-headings (org-roam-obsidian--extract-org-headings new-content))
+         ;; Get preamble (everything before first heading)
+         (preamble (with-temp-buffer
+                    (insert existing-content)
+                    (goto-char (point-min))
+                    (if (re-search-forward "^\\* " nil t)
+                        (buffer-substring (point-min) (match-beginning 0))
+                      existing-content)))
+         ;; Merge and sort headings
+         (all-headings (org-roam-obsidian--sort-headings-by-time
+                       (append existing-headings new-headings))))
+    ;; Reconstruct content
+    (concat preamble
+            (mapconcat (lambda (heading) (cdr heading)) all-headings "\n"))))
+
+(defun org-roam-obsidian--merge-daily-md-content (existing-content new-content)
+  "Merge NEW-CONTENT into EXISTING-CONTENT for markdown daily notes.
+Extracts headings, merges them, and sorts by time."
+  (let* ((existing-headings (org-roam-obsidian--extract-md-headings existing-content))
+         (new-headings (org-roam-obsidian--extract-md-headings new-content))
+         ;; Get preamble (everything before first heading)
+         (preamble (with-temp-buffer
+                    (insert existing-content)
+                    (goto-char (point-min))
+                    (if (re-search-forward "^## " nil t)
+                        (buffer-substring (point-min) (match-beginning 0))
+                      existing-content)))
+         ;; Merge and sort headings
+         (all-headings (org-roam-obsidian--sort-headings-by-time
+                       (append existing-headings new-headings))))
+    ;; Reconstruct content
+    (concat preamble
+            (mapconcat (lambda (heading) (cdr heading)) all-headings "\n"))))
+
+(defun org-roam-obsidian--sync-daily-org-to-md (org-file md-file)
+  "Sync daily note from ORG-FILE to MD-FILE with merge and sort."
+  (let* ((org-content (with-temp-buffer
+                        (insert-file-contents org-file)
+                        (buffer-string)))
+         (org-id (org-roam-obsidian--get-or-create-id org-file))
+         (new-md-content (org-roam-obsidian--org-to-md org-content))
+         (new-md-content-wikilinks (org-roam-obsidian--convert-id-links-to-wikilinks new-md-content)))
+
+    (if (file-exists-p md-file)
+        ;; File exists - merge content
+        (let* ((existing-md-content (with-temp-buffer
+                                      (insert-file-contents md-file)
+                                      (buffer-string)))
+               (merged-content (org-roam-obsidian--merge-daily-md-content
+                               existing-md-content new-md-content-wikilinks)))
+          (with-temp-file md-file
+            (insert merged-content)))
+      ;; File doesn't exist - create new
+      (with-temp-file md-file
+        (insert new-md-content-wikilinks)))
+
+    (org-roam-obsidian--update-sync-time org-id)
+    'synced))
+
+(defun org-roam-obsidian--sync-daily-md-to-org (md-file org-file)
+  "Sync daily note from MD-FILE to ORG-FILE with merge and sort."
+  (let* ((md-content (with-temp-buffer
+                       (insert-file-contents md-file)
+                       (buffer-string)))
+         (new-org-content-base (org-roam-obsidian--md-to-org md-content))
+         (new-org-content (org-roam-obsidian--convert-wikilinks-to-id new-org-content-base))
+         (org-id (if (file-exists-p org-file)
+                     (org-roam-obsidian--get-or-create-id org-file)
+                   (org-id-new)))
+         (title (file-name-base md-file)))
+
+    (if (file-exists-p org-file)
+        ;; File exists - merge content
+        (let* ((existing-org-content (with-temp-buffer
+                                       (insert-file-contents org-file)
+                                       (buffer-string)))
+               (merged-content (org-roam-obsidian--merge-daily-org-content
+                               existing-org-content new-org-content)))
+          (with-temp-file org-file
+            (insert merged-content)))
+      ;; File doesn't exist - create new
+      (with-temp-file org-file
+        (insert ":PROPERTIES:\n")
+        (insert (format ":ID:       %s\n" org-id))
+        (insert ":END:\n")
+        (insert (format "#+title: %s\n\n" title))
+        (insert new-org-content)))
+
+    (org-roam-obsidian--update-sync-time org-id)
+    (when (fboundp 'org-roam-db-update-file)
+      (org-roam-db-update-file org-file))
+    'synced))
+
 ;;; ID Management
 
 (defun org-roam-obsidian--get-or-create-id (org-file)
@@ -616,9 +803,21 @@ Returns \\='synced, \\='conflict, or \\='unchanged."
                     (file-attributes md-file)))
          (last-sync (org-roam-obsidian--get-last-sync-time org-id))
          (org-modified (time-less-p last-sync org-mtime))
-         (md-modified (time-less-p last-sync md-mtime)))
+         (md-modified (time-less-p last-sync md-mtime))
+         (is-daily (org-roam-obsidian--is-daily-file org-file)))
 
     (cond
+     ;; Daily files: always merge and sort (no conflict, just merge both)
+     ((and is-daily (or org-modified md-modified))
+      (message "Merging daily note: %s <-> %s"
+               (file-name-nondirectory org-file)
+               (file-name-nondirectory md-file))
+      (when org-modified
+        (org-roam-obsidian--sync-daily-org-to-md org-file md-file))
+      (when md-modified
+        (org-roam-obsidian--sync-daily-md-to-org md-file org-file))
+      'synced)
+
      ;; Both modified - conflict!
      ((and org-modified md-modified)
       (org-roam-obsidian--handle-conflict org-file md-file org-mtime md-mtime))
@@ -627,13 +826,17 @@ Returns \\='synced, \\='conflict, or \\='unchanged."
      (org-modified
       (message "Syncing %s -> %s" (file-name-nondirectory org-file)
                (file-name-nondirectory md-file))
-      (org-roam-obsidian--sync-org-to-md org-file md-file))
+      (if is-daily
+          (org-roam-obsidian--sync-daily-org-to-md org-file md-file)
+        (org-roam-obsidian--sync-org-to-md org-file md-file)))
 
      ;; Only md modified - sync md -> org
      (md-modified
       (message "Syncing %s -> %s" (file-name-nondirectory md-file)
                (file-name-nondirectory org-file))
-      (org-roam-obsidian--sync-md-to-org md-file org-file))
+      (if is-daily
+          (org-roam-obsidian--sync-daily-md-to-org md-file org-file)
+        (org-roam-obsidian--sync-md-to-org md-file org-file)))
 
      ;; Neither modified
      (t 'unchanged))))
