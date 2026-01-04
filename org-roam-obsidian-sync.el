@@ -387,6 +387,21 @@ TITLE is the note title."
   (while (re-search-forward "\\b_\\([^_\n]+?\\)_\\b" nil t)
     (replace-match "/\\1/" nil nil)))
 
+;;; Format Conversion - Org to Markdown
+
+(defun org-roam-obsidian--org-to-md (org-content)
+  "Convert org-mode string ORG-CONTENT to markdown string."
+  (with-temp-buffer
+    (insert org-content)
+    (org-mode)
+    ;; Export to markdown using ox-md with custom link transcoder
+    (let ((org-export-with-toc nil)
+          (org-export-with-author nil)
+          (org-export-with-date nil)
+          (org-export-with-title nil)
+          (org-export-with-properties nil))
+      (org-export-as 'md nil nil t))))
+
 ;;; ID Management
 
 (defun org-roam-obsidian--get-or-create-id (org-file)
