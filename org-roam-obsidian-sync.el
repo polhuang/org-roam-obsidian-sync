@@ -282,9 +282,13 @@ Returns the subdirectory path without the filename."
   "Generate Obsidian filename based on naming pattern for TITLE."
   (let* ((slug (org-roam-node-slug (org-roam-node-create :title title)))
          (timestamp (format-time-string "%Y%m%d%H%M%S"))
+         ;; Sanitize title for use in filenames - replace illegal characters
+         (safe-title (replace-regexp-in-string
+                      "[/\\\\:<>\"*?|]" "-"
+                      (string-trim title)))
          (pattern org-roam-obsidian-naming-pattern))
     (replace-regexp-in-string
-     "%title" title
+     "%title" safe-title
      (replace-regexp-in-string
       "%slug" slug
       (replace-regexp-in-string
