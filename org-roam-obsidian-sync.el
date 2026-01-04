@@ -402,6 +402,66 @@ TITLE is the note title."
           (org-export-with-properties nil))
       (org-export-as 'md nil nil t))))
 
+;;; Link Conversion
+
+(defun org-roam-obsidian--find-node-by-title (title)
+  "Find org-roam node by TITLE or alias.
+Returns (id . file) or nil if not found."
+  (when (and (fboundp 'org-roam-db-query) title)
+    (let ((results (org-roam-db-query
+                    [:select [id file]
+                     :from nodes
+                     :where (= title $s1)]
+                    title)))
+      (when results
+        (let ((result (car results)))
+          (cons (car result) (cadr result)))))))
+
+(defun org-roam-obsidian--get-node-title-by-id (id)
+  "Get node title from org-roam database by ID."
+  (when (and (fboundp 'org-roam-db-query) id)
+    (let ((results (org-roam-db-query
+                    [:select title
+                     :from nodes
+                     :where (= id $s1)]
+                    id)))
+      (when results
+        (caar results)))))
+
+(defun org-roam-obsidian--convert-wikilinks-to-id (text)
+  "Convert Obsidian [[wikilinks]] to org-roam [[id:uuid][title]] links in TEXT."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    ;; Match [[wikilink]] or [[wikilink|display]]
+    (while (re-search-forward "\\[\\[\\([^]|]+\\)\\(|\\([^]]+\\)\\)?\\]\\]" nil t)
+      (let* ((title (match-string 1))
+             (display (or (match-string 3) title))
+             (node-info (org-roam-obsidian--find-node-by-title title)))
+        (if node-info
+            (let ((id (car node-info)))
+              (replace-match (format "[[id:%s][%s]]" id display) nil nil))
+          ;; No node found, leave as plain text or org-style link without id
+          (replace-match (format "[[%s][%s]]" title display) nil nil))))
+    (buffer-string)))
+
+(defun org-roam-obsidian--convert-id-links-to-wikilinks (text)
+  "Convert [[id:uuid][title]] links to [[title]] wikilinks in TEXT."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    ;; Match [[id:uuid][display]] or [[id:uuid]]
+    (while (re-search-forward "\\[\\[id:\\([^]]+\\)\\]\\(\\[\\([^]]+\\)\\]\\)?\\]" nil t)
+      (let* ((id (match-string 1))
+             (display (match-string 3))
+             (title (or (org-roam-obsidian--get-node-title-by-id id)
+                       display
+                       "unknown")))
+        (if (and display (not (string= title display)))
+            (replace-match (format "[[%s|%s]]" title display) nil nil)
+          (replace-match (format "[[%s]]" title) nil nil))))
+    (buffer-string)))
+
 ;;; ID Management
 
 (defun org-roam-obsidian--get-or-create-id (org-file)
