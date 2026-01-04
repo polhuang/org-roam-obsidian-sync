@@ -268,6 +268,16 @@ TITLE is the note title."
 
 ;;; File Name Generation
 
+(defun org-roam-obsidian--get-relative-path (file base-dir)
+  "Get relative directory path of FILE from BASE-DIR.
+Returns the subdirectory path without the filename."
+  (let* ((file-dir (file-name-directory file))
+         (expanded-base (file-name-as-directory (expand-file-name base-dir)))
+         (expanded-file-dir (file-name-as-directory (expand-file-name file-dir))))
+    (if (string-prefix-p expanded-base expanded-file-dir)
+        (substring expanded-file-dir (length expanded-base))
+      "")))
+
 (defun org-roam-obsidian--generate-md-filename (title)
   "Generate Obsidian filename based on naming pattern for TITLE."
   (let* ((slug (org-roam-node-slug (org-roam-node-create :title title)))
@@ -286,6 +296,30 @@ TITLE is the note title."
   (let ((slug (org-roam-node-slug (org-roam-node-create :title title)))
         (timestamp (format-time-string "%Y%m%d%H%M%S")))
     (format "%s-%s.org" timestamp slug)))
+
+(defun org-roam-obsidian--generate-md-path (org-file)
+  "Generate full markdown path for ORG-FILE, preserving subdirectory structure."
+  (let* ((title (org-roam-obsidian--extract-title-from-org org-file))
+         (relative-dir (org-roam-obsidian--get-relative-path
+                        org-file org-roam-obsidian-roam-path))
+         (md-filename (org-roam-obsidian--generate-md-filename title))
+         (md-dir (expand-file-name relative-dir org-roam-obsidian-vault-path)))
+    ;; Ensure directory exists
+    (unless (file-directory-p md-dir)
+      (make-directory md-dir t))
+    (expand-file-name md-filename md-dir)))
+
+(defun org-roam-obsidian--generate-org-path (md-file)
+  "Generate full org path for MD-FILE, preserving subdirectory structure."
+  (let* ((title (org-roam-obsidian--extract-title-from-md md-file))
+         (relative-dir (org-roam-obsidian--get-relative-path
+                        md-file org-roam-obsidian-vault-path))
+         (org-filename (org-roam-obsidian--generate-org-filename title))
+         (org-dir (expand-file-name relative-dir org-roam-obsidian-roam-path)))
+    ;; Ensure directory exists
+    (unless (file-directory-p org-dir)
+      (make-directory org-dir t))
+    (expand-file-name org-filename org-dir)))
 
 ;;; Title Extraction
 
@@ -653,8 +687,7 @@ ORG-MTIME and MD-MTIME are the modification times."
 MD-FILES is list of existing markdown files for matching."
   (let* ((title (org-roam-obsidian--extract-title-from-org org-file))
          (org-id (org-roam-obsidian--ensure-id-in-org-file org-file))
-         (md-filename (org-roam-obsidian--generate-md-filename title))
-         (md-file (expand-file-name md-filename org-roam-obsidian-vault-path)))
+         (md-file (org-roam-obsidian--generate-md-path org-file)))
 
     ;; Check if markdown file with this title already exists
     (if-let ((existing-md (org-roam-obsidian--find-md-by-title title md-files)))
@@ -664,8 +697,9 @@ MD-FILES is list of existing markdown files for matching."
                    (file-name-nondirectory org-file)
                    (file-name-nondirectory existing-md))
           (org-roam-obsidian--add-mapping org-file existing-md org-id title))
-      ;; No match - create new markdown file
-      (message "Creating new markdown: %s" (file-name-nondirectory md-file))
+      ;; No match - create new markdown file (preserving directory structure)
+      (message "Creating new markdown: %s"
+               (file-relative-name md-file org-roam-obsidian-vault-path))
       (org-roam-obsidian--sync-org-to-md org-file md-file)
       (org-roam-obsidian--add-mapping org-file md-file org-id title))))
 
@@ -673,8 +707,7 @@ MD-FILES is list of existing markdown files for matching."
   "Handle new MD-FILE - create corresponding org file.
 ORG-FILES is list of existing org files for matching."
   (let* ((title (org-roam-obsidian--extract-title-from-md md-file))
-         (org-filename (org-roam-obsidian--generate-org-filename title))
-         (org-file (expand-file-name org-filename org-roam-obsidian-roam-path)))
+         (org-file (org-roam-obsidian--generate-org-path md-file)))
 
     ;; Check if org file with this title already exists
     (if-let ((existing-org (cl-find-if
@@ -688,8 +721,9 @@ ORG-FILES is list of existing org files for matching."
                    (file-name-nondirectory md-file)
                    (file-name-nondirectory existing-org))
           (org-roam-obsidian--add-mapping existing-org md-file org-id title))
-      ;; No match - create new org file
-      (message "Creating new org: %s" (file-name-nondirectory org-file))
+      ;; No match - create new org file (preserving directory structure)
+      (message "Creating new org: %s"
+               (file-relative-name org-file org-roam-obsidian-roam-path))
       (org-roam-obsidian--sync-md-to-org md-file org-file)
       (let ((org-id (org-roam-obsidian--get-or-create-id org-file)))
         (org-roam-obsidian--add-mapping org-file md-file org-id title)))))
