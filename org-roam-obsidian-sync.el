@@ -607,9 +607,19 @@ HEADINGS is a list of (time-minutes . heading-text) pairs."
              ;; Neither has time - preserve order
              (t t))))))
 
+(defun org-roam-obsidian--deduplicate-headings (existing new)
+  "Remove headings from NEW that have same time as EXISTING.
+Keeps the existing heading, skips duplicates from new.
+EXISTING and NEW are lists of (time-minutes . heading-text) pairs."
+  (let ((existing-times (mapcar #'car existing)))
+    (cl-remove-if (lambda (heading)
+                    (and (car heading) ; has time
+                         (member (car heading) existing-times)))
+                  new)))
+
 (defun org-roam-obsidian--merge-daily-org-content (existing-content new-content)
   "Merge NEW-CONTENT into EXISTING-CONTENT for org daily notes.
-Extracts headings, merges them, and sorts by time."
+Extracts headings, merges them, deduplicates by time, and sorts by time."
   (let* ((existing-headings (org-roam-obsidian--extract-org-headings existing-content))
          (new-headings (org-roam-obsidian--extract-org-headings new-content))
          ;; Get preamble (everything before first heading)
@@ -619,16 +629,19 @@ Extracts headings, merges them, and sorts by time."
                     (if (re-search-forward "^\\* " nil t)
                         (buffer-substring (point-min) (match-beginning 0))
                       existing-content)))
-         ;; Merge and sort headings
+         ;; Deduplicate and merge headings
+         (unique-new-headings (org-roam-obsidian--deduplicate-headings
+                              existing-headings new-headings))
+         ;; Sort all headings by time
          (all-headings (org-roam-obsidian--sort-headings-by-time
-                       (append existing-headings new-headings))))
+                       (append existing-headings unique-new-headings))))
     ;; Reconstruct content
     (concat preamble
             (mapconcat (lambda (heading) (cdr heading)) all-headings "\n"))))
 
 (defun org-roam-obsidian--merge-daily-md-content (existing-content new-content)
   "Merge NEW-CONTENT into EXISTING-CONTENT for markdown daily notes.
-Extracts headings, merges them, and sorts by time."
+Extracts headings, merges them, deduplicates by time, and sorts by time."
   (let* ((existing-headings (org-roam-obsidian--extract-md-headings existing-content))
          (new-headings (org-roam-obsidian--extract-md-headings new-content))
          ;; Get preamble (everything before first heading)
@@ -638,9 +651,12 @@ Extracts headings, merges them, and sorts by time."
                     (if (re-search-forward "^## " nil t)
                         (buffer-substring (point-min) (match-beginning 0))
                       existing-content)))
-         ;; Merge and sort headings
+         ;; Deduplicate and merge headings
+         (unique-new-headings (org-roam-obsidian--deduplicate-headings
+                              existing-headings new-headings))
+         ;; Sort all headings by time
          (all-headings (org-roam-obsidian--sort-headings-by-time
-                       (append existing-headings new-headings))))
+                       (append existing-headings unique-new-headings))))
     ;; Reconstruct content
     (concat preamble
             (mapconcat (lambda (heading) (cdr heading)) all-headings "\n"))))
