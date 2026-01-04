@@ -266,5 +266,101 @@ TITLE is the note title."
     (setf (alist-get 'last-sync mapping) (current-time))
     (puthash org-id mapping org-roam-obsidian--file-map)))
 
+;;; File Name Generation
+
+(defun org-roam-obsidian--generate-md-filename (title)
+  "Generate Obsidian filename based on naming pattern for TITLE."
+  (let* ((slug (org-roam-node-slug (org-roam-node-create :title title)))
+         (timestamp (format-time-string "%Y%m%d%H%M%S"))
+         (pattern org-roam-obsidian-naming-pattern))
+    (replace-regexp-in-string
+     "%title" title
+     (replace-regexp-in-string
+      "%slug" slug
+      (replace-regexp-in-string
+       "%timestamp" timestamp
+       pattern)))))
+
+(defun org-roam-obsidian--generate-org-filename (title)
+  "Generate org-roam filename based on naming pattern for TITLE."
+  (let ((slug (org-roam-node-slug (org-roam-node-create :title title)))
+        (timestamp (format-time-string "%Y%m%d%H%M%S")))
+    (format "%s-%s.org" timestamp slug)))
+
+;;; Title Extraction
+
+(defun org-roam-obsidian--extract-title-from-org (org-file)
+  "Extract title from ORG-FILE (#+title: or first heading)."
+  (with-temp-buffer
+    (insert-file-contents org-file)
+    (goto-char (point-min))
+    (or (when (re-search-forward "^#\\+title: \\(.*\\)$" nil t)
+          (match-string-no-properties 1))
+        (when (re-search-forward "^\\* \\(.*\\)$" nil t)
+          (match-string-no-properties 1))
+        (file-name-base org-file))))
+
+(defun org-roam-obsidian--extract-title-from-md (md-file)
+  "Extract title from MD-FILE (# heading or YAML frontmatter)."
+  (with-temp-buffer
+    (insert-file-contents md-file)
+    (goto-char (point-min))
+    (or ;; Try YAML frontmatter
+        (when (looking-at "^---$")
+          (forward-line)
+          (when (re-search-forward "^title: \\(.*\\)$" nil t)
+            (match-string-no-properties 1)))
+        ;; Try first markdown header
+        (when (re-search-forward "^# \\(.*\\)$" nil t)
+          (match-string-no-properties 1))
+        (file-name-base md-file))))
+
+;;; ID Management
+
+(defun org-roam-obsidian--get-or-create-id (org-file)
+  "Get existing org ID from ORG-FILE, or create new one if missing."
+  (with-temp-buffer
+    (insert-file-contents org-file)
+    (goto-char (point-min))
+    (or (when (re-search-forward "^:ID: +\\(.+\\)$" nil t)
+          (match-string-no-properties 1))
+        (org-id-new))))
+
+(defun org-roam-obsidian--ensure-id-in-org-file (org-file)
+  "Ensure ORG-FILE has an ID property, add if missing.
+Returns the ID."
+  (let ((id nil))
+    (with-current-buffer (find-file-noselect org-file)
+      (save-excursion
+        (goto-char (point-min))
+        (if (re-search-forward "^:ID: +\\(.+\\)$" nil t)
+            (setq id (match-string-no-properties 1))
+          ;; Need to add ID
+          (goto-char (point-min))
+          (setq id (org-id-new))
+          (if (re-search-forward "^:PROPERTIES:" nil t)
+              ;; PROPERTIES drawer exists, add ID to it
+              (progn
+                (forward-line)
+                (beginning-of-line)
+                (insert (format ":ID:       %s\n" id)))
+            ;; Create PROPERTIES drawer
+            ;; Insert before #+title if it exists, otherwise at beginning
+            (goto-char (point-min))
+            (if (re-search-forward "^#\\+title:" nil t)
+                (progn
+                  (beginning-of-line)
+                  (insert ":PROPERTIES:\n")
+                  (insert (format ":ID:       %s\n" id))
+                  (insert ":END:\n"))
+              ;; No #+title, insert at beginning
+              (goto-char (point-min))
+              (insert ":PROPERTIES:\n")
+              (insert (format ":ID:       %s\n" id))
+              (insert ":END:\n")))
+          (save-buffer)))
+      (kill-buffer))
+    id))
+
 (provide 'org-roam-obsidian-sync)
 ;;; org-roam-obsidian-sync.el ends here
