@@ -1149,31 +1149,36 @@ ORG-FILES is list of existing org files for matching."
      (message "Org-roam-Obsidian sync error: %s" (error-message-string err)))))
 
 (defun org-roam-obsidian--update-sync-mode ()
-  "Update sync mode based on current setting."
-  (pcase org-roam-obsidian-sync-mode-type
-    ('manual
-     (org-roam-obsidian--disable-save-hook)
-     (org-roam-obsidian--stop-timer))
+  "Update sync mode based on current settings."
+  ;; Handle on-save sync
+  (if org-roam-obsidian-sync-on-save
+      (org-roam-obsidian--enable-save-hook)
+    (org-roam-obsidian--disable-save-hook))
 
-    ('on-save
-     (org-roam-obsidian--enable-save-hook)
-     (org-roam-obsidian--stop-timer))
-
-    ('periodic
-     (org-roam-obsidian--disable-save-hook)
-     (org-roam-obsidian--start-timer))))
+  ;; Handle periodic sync
+  (if org-roam-obsidian-sync-periodic
+      (org-roam-obsidian--start-timer)
+    (org-roam-obsidian--stop-timer)))
 
 ;;;###autoload
-(defun org-roam-obsidian-toggle-sync-mode ()
-  "Toggle between sync modes."
+(defun org-roam-obsidian-toggle-on-save-sync ()
+  "Toggle on-save sync on/off."
   (interactive)
-  (setq org-roam-obsidian-sync-mode-type
-        (pcase org-roam-obsidian-sync-mode-type
-          ('manual 'on-save)
-          ('on-save 'periodic)
-          ('periodic 'manual)))
+  (setq org-roam-obsidian-sync-on-save
+        (not org-roam-obsidian-sync-on-save))
   (org-roam-obsidian--update-sync-mode)
-  (message "Sync mode: %s" org-roam-obsidian-sync-mode-type))
+  (message "On-save sync: %s"
+           (if org-roam-obsidian-sync-on-save "enabled" "disabled")))
+
+;;;###autoload
+(defun org-roam-obsidian-toggle-periodic-sync ()
+  "Toggle periodic sync on/off."
+  (interactive)
+  (setq org-roam-obsidian-sync-periodic
+        (not org-roam-obsidian-sync-periodic))
+  (org-roam-obsidian--update-sync-mode)
+  (message "Periodic sync: %s"
+           (if org-roam-obsidian-sync-periodic "enabled" "disabled")))
 
 ;;; Minor Mode
 
