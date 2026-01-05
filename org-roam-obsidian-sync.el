@@ -3,7 +3,7 @@
 ;; Author: Paul Huang
 ;; Version: 0.0.1
 ;; Package-Requires: ((emacs "27.1"))
-;; Keywords: org, org-roam, obsidian, notes
+;; Keywords: org, org-roam, obsidian, notes, productivity
 ;; URL: https://github.com/polhuang/org-roam-obsidian-sync.el
 
 ;; This file is not part of GNU Emacs.
