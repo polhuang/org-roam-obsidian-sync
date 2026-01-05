@@ -80,15 +80,16 @@ Defaults to `org-roam-extract-new-file-path' if available."
 
 ;;;; Sync Behavior
 
-(defcustom org-roam-obsidian-sync-mode-type 'manual
-  "Default sync mode.
-Options:
-  \\='manual - Sync only via explicit command
-  \\='on-save - Sync whenever a file is saved
-  \\='periodic - Background sync at regular intervals"
-  :type '(choice (const :tag "Manual" manual)
-                 (const :tag "On Save" on-save)
-                 (const :tag "Periodic" periodic))
+(defcustom org-roam-obsidian-sync-on-save nil
+  "If non-nil, automatically sync files when they are saved.
+Works for both org-roam and Obsidian directories."
+  :type 'boolean
+  :group 'org-roam-obsidian-sync)
+
+(defcustom org-roam-obsidian-sync-periodic nil
+  "If non-nil, automatically sync at regular intervals.
+See `org-roam-obsidian-sync-interval' to configure the interval."
+  :type 'boolean
   :group 'org-roam-obsidian-sync)
 
 (defcustom org-roam-obsidian-sync-interval 3600
