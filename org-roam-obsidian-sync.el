@@ -1106,30 +1106,110 @@ ORG-FILES is list of existing org files for matching."
     (org-roam-obsidian--save-mappings)
     (message "Mappings reset. Run sync to rebuild.")))
 
-;;; Auto-Save Mode
+;;; File Notification Sync Mode
 
-(defun org-roam-obsidian--enable-save-hook ()
-  "Enable sync on save for files in sync directories."
-  (unless org-roam-obsidian--save-hook-enabled
-    (add-hook 'after-save-hook
-              #'org-roam-obsidian--after-save-function)
-    (setq org-roam-obsidian--save-hook-enabled t)))
+(defun org-roam-obsidian--start-file-watching ()
+  "Start watching both sync directories for file changes."
+  (org-roam-obsidian--stop-file-watching)
 
-(defun org-roam-obsidian--disable-save-hook ()
-  "Disable sync on save."
-  (when org-roam-obsidian--save-hook-enabled
-    (remove-hook 'after-save-hook
-                 #'org-roam-obsidian--after-save-function)
-    (setq org-roam-obsidian--save-hook-enabled nil)))
+  ;; Watch org-roam directory
+  (when (file-directory-p org-roam-obsidian-roam-path)
+    (condition-case err
+        (let ((descriptor (file-notify-add-watch
+                          (expand-file-name org-roam-obsidian-roam-path)
+                          '(change)
+                          #'org-roam-obsidian--file-change-callback)))
+          (push descriptor org-roam-obsidian--file-watchers))
+      (error
+       (message "Failed to watch org-roam directory: %s" (error-message-string err)))))
 
-(defun org-roam-obsidian--after-save-function ()
-  "Hook function to sync file after save."
-  (when (and (buffer-file-name)
-             (or (string-prefix-p (expand-file-name org-roam-obsidian-roam-path)
-                                 (buffer-file-name))
-                 (string-prefix-p (expand-file-name org-roam-obsidian-vault-path)
-                                 (buffer-file-name))))
-    (run-with-idle-timer 0.5 nil #'org-roam-obsidian-sync-current-file)))
+  ;; Watch Obsidian vault directory
+  (when (file-directory-p org-roam-obsidian-vault-path)
+    (condition-case err
+        (let ((descriptor (file-notify-add-watch
+                          (expand-file-name org-roam-obsidian-vault-path)
+                          '(change)
+                          #'org-roam-obsidian--file-change-callback)))
+          (push descriptor org-roam-obsidian--file-watchers))
+      (error
+       (message "Failed to watch Obsidian directory: %s" (error-message-string err))))))
+
+(defun org-roam-obsidian--stop-file-watching ()
+  "Stop all file watchers and cancel pending syncs."
+  (dolist (descriptor org-roam-obsidian--file-watchers)
+    (file-notify-rm-watch descriptor))
+  (setq org-roam-obsidian--file-watchers nil)
+
+  ;; Cancel all pending sync timers
+  (maphash (lambda (_file timer)
+             (when (timerp timer)
+               (cancel-timer timer)))
+           org-roam-obsidian--pending-syncs)
+  (clrhash org-roam-obsidian--pending-syncs))
+
+(defun org-roam-obsidian--file-change-callback (event)
+  "Handle file system change event.
+EVENT format: (DESCRIPTOR ACTION FILE [FILE1])"
+  (let* ((action (nth 1 event))
+         (file (nth 2 event)))
+
+    ;; Filter: only process .org and .md files
+    (when (and file
+               (file-regular-p file)
+               (or (string-suffix-p ".org" file)
+                   (string-suffix-p ".md" file))
+               ;; Skip hidden files and Obsidian metadata
+               (not (string-match-p "/\\." file)))
+
+      ;; Debounce: cancel existing timer for this file
+      (when-let ((existing-timer (gethash file org-roam-obsidian--pending-syncs)))
+        (when (timerp existing-timer)
+          (cancel-timer existing-timer)))
+
+      ;; Schedule sync after 1 second of idle time
+      (let ((new-timer
+             (run-with-idle-timer 1.0 nil
+               (lambda ()
+                 (condition-case err
+                     (progn
+                       (org-roam-obsidian-sync-current-file-by-path file)
+                       (remhash file org-roam-obsidian--pending-syncs))
+                   (error
+                    (message "File-notify sync error for %s: %s"
+                             (file-name-nondirectory file)
+                             (error-message-string err))
+                    (remhash file org-roam-obsidian--pending-syncs)))))))
+        (puthash file new-timer org-roam-obsidian--pending-syncs))))
+
+(defun org-roam-obsidian-sync-current-file-by-path (file)
+  "Sync FILE to its corresponding pair.
+FILE should be an absolute path to either an org or md file."
+  (org-roam-obsidian--load-mappings)
+
+  (cond
+   ;; In org-roam directory
+   ((string-prefix-p (expand-file-name org-roam-obsidian-roam-path) file)
+    (when (file-exists-p file)
+      (let* ((org-id (org-roam-obsidian--ensure-id-in-org-file file))
+             (mapping (org-roam-obsidian--get-mapping-by-id org-id)))
+        (if mapping
+            (let ((md-file (alist-get 'md-file mapping)))
+              (org-roam-obsidian--sync-org-to-md file md-file)
+              (org-roam-obsidian--save-mappings))
+          ;; No mapping - silently ignore (user can run full sync to create)
+          nil))))
+
+   ;; In Obsidian directory
+   ((string-prefix-p (expand-file-name org-roam-obsidian-vault-path) file)
+    (when (file-exists-p file)
+      (let ((org-id (org-roam-obsidian--get-mapping-by-md-file file)))
+        (if org-id
+            (let* ((mapping (org-roam-obsidian--get-mapping-by-id org-id))
+                   (org-file (alist-get 'org-file mapping)))
+              (org-roam-obsidian--sync-md-to-org file org-file)
+              (org-roam-obsidian--save-mappings))
+          ;; No mapping - silently ignore
+          nil))))))
 
 ;;; Periodic Sync Mode
 
