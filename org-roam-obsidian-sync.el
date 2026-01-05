@@ -1236,10 +1236,10 @@ FILE should be an absolute path to either an org or md file."
 
 (defun org-roam-obsidian--update-sync-mode ()
   "Update sync mode based on current settings."
-  ;; Handle on-save sync
-  (if org-roam-obsidian-sync-on-save
-      (org-roam-obsidian--enable-save-hook)
-    (org-roam-obsidian--disable-save-hook))
+  ;; Handle on-change sync (file notifications)
+  (if org-roam-obsidian-sync-on-change
+      (org-roam-obsidian--start-file-watching)
+    (org-roam-obsidian--stop-file-watching))
 
   ;; Handle periodic sync
   (if org-roam-obsidian-sync-periodic
@@ -1247,14 +1247,14 @@ FILE should be an absolute path to either an org or md file."
     (org-roam-obsidian--stop-timer)))
 
 ;;;###autoload
-(defun org-roam-obsidian-toggle-on-save-sync ()
-  "Toggle on-save sync on/off."
+(defun org-roam-obsidian-toggle-on-change-sync ()
+  "Toggle on-change sync on/off."
   (interactive)
-  (setq org-roam-obsidian-sync-on-save
-        (not org-roam-obsidian-sync-on-save))
+  (setq org-roam-obsidian-sync-on-change
+        (not org-roam-obsidian-sync-on-change))
   (org-roam-obsidian--update-sync-mode)
-  (message "On-save sync: %s"
-           (if org-roam-obsidian-sync-on-save "enabled" "disabled")))
+  (message "On-change sync: %s"
+           (if org-roam-obsidian-sync-on-change "enabled" "disabled")))
 
 ;;;###autoload
 (defun org-roam-obsidian-toggle-periodic-sync ()
