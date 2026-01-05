@@ -80,9 +80,11 @@ Defaults to `org-roam-extract-new-file-path' if available."
 
 ;;;; Sync Behavior
 
-(defcustom org-roam-obsidian-sync-on-save nil
-  "If non-nil, automatically sync files when they are saved.
-Works for both org-roam and Obsidian directories."
+(defcustom org-roam-obsidian-sync-on-change nil
+  "If non-nil, automatically sync files when they change.
+Uses file system notifications to detect changes in both org-roam
+and Obsidian directories, including changes made by external applications
+like the Obsidian app."
   :type 'boolean
   :group 'org-roam-obsidian-sync)
 
@@ -155,8 +157,12 @@ Each value is an alist with keys:
   (expand-file-name "org-roam-obsidian-map.el" user-emacs-directory)
   "File to persist mapping data.")
 
-(defvar org-roam-obsidian--save-hook-enabled nil
-  "Whether save hook is currently active.")
+(defvar org-roam-obsidian--file-watchers nil
+  "List of active file notification descriptors.")
+
+(defvar org-roam-obsidian--pending-syncs (make-hash-table :test 'equal)
+  "Hash table tracking files with pending sync operations.
+Keys are file paths, values are timer objects.")
 
 (defvar org-roam-obsidian--timer nil
   "Timer object for periodic sync.")
