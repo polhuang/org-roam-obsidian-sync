@@ -91,8 +91,8 @@ Options:
                  (const :tag "Periodic" periodic))
   :group 'org-roam-obsidian-sync)
 
-(defcustom org-roam-obsidian-sync-interval 300
-  "Interval in seconds for periodic sync (default: 5 minutes)."
+(defcustom org-roam-obsidian-sync-interval 3600
+  "Interval in seconds for periodic sync."
   :type 'integer
   :group 'org-roam-obsidian-sync)
 
