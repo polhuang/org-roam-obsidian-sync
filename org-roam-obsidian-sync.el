@@ -678,10 +678,10 @@ Extracts headings, merges them, deduplicates by time, and sorts by time."
                (merged-content (org-roam-obsidian--merge-daily-md-content
                                existing-md-content new-md-content-wikilinks)))
           (with-temp-file md-file
-            (insert merged-content)))
+            (insert (string-trim-left merged-content))))
       ;; File doesn't exist - create new
       (with-temp-file md-file
-        (insert new-md-content-wikilinks)))
+        (insert (string-trim-left new-md-content-wikilinks))))
 
     (org-roam-obsidian--update-sync-time org-id)
     'synced))
@@ -780,7 +780,7 @@ Returns \\='synced on success."
          ;; Convert ID links to wikilinks
          (md-content-final (org-roam-obsidian--convert-id-links-to-wikilinks md-content)))
     (with-temp-file md-file
-      (insert md-content-final))
+      (insert (string-trim-left md-content-final)))
     (org-roam-obsidian--update-sync-time org-id)
     'synced))
 
