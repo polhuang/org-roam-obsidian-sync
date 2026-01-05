@@ -1,7 +1,7 @@
-;;; org-roam-obsidian-sync.el --- Sync Org Mode Roam with Obsidian -*- lexical-binding: t; -*-
+;;; org-roam-obsidian-sync.el --- Sync Org-Roam with Obsidian -*- lexical-binding: t; -*-
 
 ;; Author: Paul Huang
-;; Version: 0.0.1
+;; Version: 0.1.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: org, org-roam, obsidian, notes, productivity
 ;; URL: https://github.com/polhuang/org-roam-obsidian-sync.el
@@ -1278,10 +1278,10 @@ FILE should be an absolute path to either an org or md file."
       (progn
         (org-roam-obsidian--load-mappings)
         (org-roam-obsidian--update-sync-mode)
-        (message "Org-roam-Obsidian sync mode enabled (on-save: %s, periodic: %s)"
-                 (if org-roam-obsidian-sync-on-save "yes" "no")
+        (message "Org-roam-Obsidian sync mode enabled (on-change: %s, periodic: %s)"
+                 (if org-roam-obsidian-sync-on-change "yes" "no")
                  (if org-roam-obsidian-sync-periodic "yes" "no")))
-    (org-roam-obsidian--disable-save-hook)
+    (org-roam-obsidian--stop-file-watching)
     (org-roam-obsidian--stop-timer)
     (message "Org-roam-Obsidian sync mode disabled")))
 
