@@ -1192,8 +1192,9 @@ ORG-FILES is list of existing org files for matching."
       (progn
         (org-roam-obsidian--load-mappings)
         (org-roam-obsidian--update-sync-mode)
-        (message "Org-roam-Obsidian sync mode enabled (%s)"
-                 org-roam-obsidian-sync-mode-type))
+        (message "Org-roam-Obsidian sync mode enabled (on-save: %s, periodic: %s)"
+                 (if org-roam-obsidian-sync-on-save "yes" "no")
+                 (if org-roam-obsidian-sync-periodic "yes" "no")))
     (org-roam-obsidian--disable-save-hook)
     (org-roam-obsidian--stop-timer)
     (message "Org-roam-Obsidian sync mode disabled")))
