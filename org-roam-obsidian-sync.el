@@ -164,8 +164,30 @@ Each value is an alist with keys:
   "Hash table tracking files with pending sync operations.
 Keys are file paths, values are timer objects.")
 
+(defvar org-roam-obsidian--sync-ignore-list (make-hash-table :test 'equal)
+  "Hash table of files to ignore for sync events.
+Keys are file paths, values are timer objects for cleanup.")
+
 (defvar org-roam-obsidian--timer nil
   "Timer object for periodic sync.")
+
+;;; Sync Ignore List Management
+
+(defun org-roam-obsidian--add-to-ignore-list (file)
+  "Add FILE to sync ignore list temporarily (2 seconds).
+This prevents infinite loops when our sync triggers file-notify events."
+  (when-let ((existing-timer (gethash file org-roam-obsidian--sync-ignore-list)))
+    (when (timerp existing-timer)
+      (cancel-timer existing-timer)))
+  (let ((cleanup-timer
+         (run-with-timer 2.0 nil
+                        (lambda ()
+                          (remhash file org-roam-obsidian--sync-ignore-list)))))
+    (puthash file cleanup-timer org-roam-obsidian--sync-ignore-list)))
+
+(defun org-roam-obsidian--should-ignore-file (file)
+  "Check if FILE is in the sync ignore list."
+  (gethash file org-roam-obsidian--sync-ignore-list))
 
 ;;; Mapping Persistence
 
@@ -677,6 +699,9 @@ Extracts headings, merges them, deduplicates by time, and sorts by time."
          (new-md-content (org-roam-obsidian--org-to-md org-content))
          (new-md-content-wikilinks (org-roam-obsidian--convert-id-links-to-wikilinks new-md-content)))
 
+    ;; Add md-file to ignore list BEFORE writing to prevent loop
+    (org-roam-obsidian--add-to-ignore-list md-file)
+
     (if (file-exists-p md-file)
         ;; File exists - merge content
         (let* ((existing-md-content (with-temp-buffer
@@ -704,6 +729,9 @@ Extracts headings, merges them, deduplicates by time, and sorts by time."
                      (org-roam-obsidian--get-or-create-id org-file)
                    (org-id-new)))
          (title (file-name-base md-file)))
+
+    ;; Add org-file to ignore list BEFORE writing to prevent loop
+    (org-roam-obsidian--add-to-ignore-list org-file)
 
     (if (file-exists-p org-file)
         ;; File exists - merge content
@@ -786,6 +814,8 @@ Returns \\='synced on success."
          (md-content (org-roam-obsidian--org-to-md org-content))
          ;; Convert ID links to wikilinks
          (md-content-final (org-roam-obsidian--convert-id-links-to-wikilinks md-content)))
+    ;; Add md-file to ignore list BEFORE writing to prevent loop
+    (org-roam-obsidian--add-to-ignore-list md-file)
     (with-temp-file md-file
       (insert (string-trim-left md-content-final)))
     (org-roam-obsidian--update-sync-time org-id)
@@ -804,6 +834,8 @@ Returns \\='synced on success."
                      (org-roam-obsidian--get-or-create-id org-file)
                    (org-id-new)))
          (title (org-roam-obsidian--extract-title-from-md md-file)))
+    ;; Add org-file to ignore list BEFORE writing to prevent loop
+    (org-roam-obsidian--add-to-ignore-list org-file)
     ;; Ensure ID property in org content
     (with-temp-file org-file
       (insert ":PROPERTIES:\n")
@@ -1108,31 +1140,69 @@ ORG-FILES is list of existing org files for matching."
 
 ;;; File Notification Sync Mode
 
+(defun org-roam-obsidian--watch-directory-recursively (root-path flags)
+  "Add file watchers to ROOT-PATH and all its subdirectories.
+FLAGS are the file-notify flags to use. Returns number of watchers added."
+  (let ((watch-count 0))
+    ;; Watch the root directory
+    (condition-case err
+        (let ((descriptor (file-notify-add-watch
+                          (expand-file-name root-path)
+                          flags
+                          #'org-roam-obsidian--file-change-callback)))
+          (push descriptor org-roam-obsidian--file-watchers)
+          (setq watch-count (1+ watch-count)))
+      (error
+       (message "Failed to watch %s: %s" root-path (error-message-string err))))
+
+    ;; Recursively watch all subdirectories
+    (when (file-directory-p root-path)
+      (dolist (subdir (directory-files-recursively
+                       root-path
+                       ".*"
+                       t  ; include-directories
+                       (lambda (dir)
+                         ;; Skip hidden directories and .obsidian
+                         (not (or (string-match-p "/\\." dir)
+                                  (string-match-p "\\.obsidian" dir))))))
+        (when (file-directory-p subdir)
+          (condition-case err
+              (let ((descriptor (file-notify-add-watch
+                                (expand-file-name subdir)
+                                flags
+                                #'org-roam-obsidian--file-change-callback)))
+                (push descriptor org-roam-obsidian--file-watchers)
+                (setq watch-count (1+ watch-count)))
+            (error
+             (message "Failed to watch subdirectory %s: %s"
+                      subdir (error-message-string err)))))))
+    watch-count))
+
 (defun org-roam-obsidian--start-file-watching ()
   "Start watching both sync directories for file changes."
   (org-roam-obsidian--stop-file-watching)
 
-  ;; Watch org-roam directory
-  (when (file-directory-p org-roam-obsidian-roam-path)
-    (condition-case err
-        (let ((descriptor (file-notify-add-watch
-                          (expand-file-name org-roam-obsidian-roam-path)
-                          '(change)
-                          #'org-roam-obsidian--file-change-callback)))
-          (push descriptor org-roam-obsidian--file-watchers))
-      (error
-       (message "Failed to watch org-roam directory: %s" (error-message-string err)))))
+  ;; Use 'change flag for all systems - Emacs abstracts the backend details
+  (let ((flags '(change))
+        (total-watchers 0))
 
-  ;; Watch Obsidian vault directory
-  (when (file-directory-p org-roam-obsidian-vault-path)
-    (condition-case err
-        (let ((descriptor (file-notify-add-watch
-                          (expand-file-name org-roam-obsidian-vault-path)
-                          '(change)
-                          #'org-roam-obsidian--file-change-callback)))
-          (push descriptor org-roam-obsidian--file-watchers))
-      (error
-       (message "Failed to watch Obsidian directory: %s" (error-message-string err))))))
+    ;; Watch org-roam directory recursively
+    (when (file-directory-p org-roam-obsidian-roam-path)
+      (let ((count (org-roam-obsidian--watch-directory-recursively
+                    org-roam-obsidian-roam-path flags)))
+        (setq total-watchers (+ total-watchers count))
+        (message "Watching org-roam directory (recursively): %s (%d watchers)"
+                 org-roam-obsidian-roam-path count)))
+
+    ;; Watch Obsidian vault directory recursively
+    (when (file-directory-p org-roam-obsidian-vault-path)
+      (let ((count (org-roam-obsidian--watch-directory-recursively
+                    org-roam-obsidian-vault-path flags)))
+        (setq total-watchers (+ total-watchers count))
+        (message "Watching Obsidian directory (recursively): %s (%d watchers)"
+                 org-roam-obsidian-vault-path count)))
+
+    (message "Total file watchers active: %d" total-watchers)))
 
 (defun org-roam-obsidian--stop-file-watching ()
   "Stop all file watchers and cancel pending syncs."
@@ -1150,66 +1220,108 @@ ORG-FILES is list of existing org files for matching."
 (defun org-roam-obsidian--file-change-callback (event)
   "Handle file system change event.
 EVENT format: (DESCRIPTOR ACTION FILE [FILE1])"
+  (message "File-notify event received: %S" event)
   (let* ((action (nth 1 event))
-         (file (nth 2 event))))
+         (file (nth 2 event)))
 
-    ;; Filter: only process .org and .md files
-    (when (and file
-               (file-regular-p file)
-               (or (string-suffix-p ".org" file)
-                   (string-suffix-p ".md" file))
-               ;; Skip hidden files and Obsidian metadata
-               (not (string-match-p "/\\." file)))
+    (message "File-notify: action=%s file=%s" action file)
+    (message "File-notify: file-exists=%s file-regular=%s"
+             (file-exists-p file)
+             (file-regular-p file))
+    (message "File-notify: is-org=%s is-md=%s"
+             (string-suffix-p ".org" file)
+             (string-suffix-p ".md" file))
 
-      ;; Debounce: cancel existing timer for this file
-      (when-let ((existing-timer (gethash file org-roam-obsidian--pending-syncs)))
-        (when (timerp existing-timer)
-          (cancel-timer existing-timer)))
+    ;; Check if file should be ignored (to prevent infinite loops)
+    (if (org-roam-obsidian--should-ignore-file file)
+        (message "File-notify: ignoring %s (recently synced)" (file-name-nondirectory file))
 
-      ;; Schedule sync after 1 second of idle time
-      (let ((new-timer
-             (run-with-idle-timer 1.0 nil
-               (lambda ()
-                 (condition-case err
-                     (progn
-                       (org-roam-obsidian-sync-current-file-by-path file)
-                       (remhash file org-roam-obsidian--pending-syncs))
-                   (error
-                    (message "File-notify sync error for %s: %s"
-                             (file-name-nondirectory file)
-                             (error-message-string err))
-                    (remhash file org-roam-obsidian--pending-syncs)))))))
-        (puthash file new-timer org-roam-obsidian--pending-syncs))))
+      ;; Filter: only process .org and .md files
+      (when (and file
+                 (file-exists-p file)
+                 (or (string-suffix-p ".org" file)
+                     (string-suffix-p ".md" file))
+                 ;; Skip hidden files and Obsidian metadata
+                 (not (string-match-p "/\\." file)))
+
+        (message "File-notify: scheduling sync for %s" file)
+
+        ;; Debounce: cancel existing timer for this file
+        (when-let ((existing-timer (gethash file org-roam-obsidian--pending-syncs)))
+          (when (timerp existing-timer)
+            (cancel-timer existing-timer)))
+
+        ;; Schedule sync after 1 second of idle time
+        (let ((new-timer
+               (run-with-idle-timer 1.0 nil
+                 (lambda ()
+                   (condition-case err
+                       (progn
+                         (org-roam-obsidian-sync-current-file-by-path file)
+                         (remhash file org-roam-obsidian--pending-syncs))
+                     (error
+                      (message "File-notify sync error for %s: %s"
+                               (file-name-nondirectory file)
+                               (error-message-string err))
+                      (remhash file org-roam-obsidian--pending-syncs)))))))
+          (puthash file new-timer org-roam-obsidian--pending-syncs))))))
 
 (defun org-roam-obsidian-sync-current-file-by-path (file)
   "Sync FILE to its corresponding pair.
 FILE should be an absolute path to either an org or md file."
+  (message "Sync-by-path called for: %s" file)
   (org-roam-obsidian--load-mappings)
 
   (cond
    ;; In org-roam directory
    ((string-prefix-p (expand-file-name org-roam-obsidian-roam-path) file)
+    (message "File is in org-roam directory")
     (when (file-exists-p file)
       (let* ((org-id (org-roam-obsidian--ensure-id-in-org-file file))
              (mapping (org-roam-obsidian--get-mapping-by-id org-id)))
         (if mapping
+            ;; Existing mapping - sync normally
             (let ((md-file (alist-get 'md-file mapping)))
+              (message "Found mapping, syncing to: %s" md-file)
               (org-roam-obsidian--sync-org-to-md file md-file)
-              (org-roam-obsidian--save-mappings))
-          ;; No mapping - silently ignore (user can run full sync to create)
-          nil))))
+              (org-roam-obsidian--save-mappings)
+              (message "Sync completed successfully"))
+          ;; No mapping - treat as new file
+          (message "New org file detected, creating corresponding markdown file...")
+          (let* ((title (org-roam-obsidian--extract-title-from-org file))
+                 (md-file (org-roam-obsidian--generate-md-path file)))
+            (org-roam-obsidian--sync-org-to-md file md-file)
+            (org-roam-obsidian--add-mapping file md-file org-id title)
+            (org-roam-obsidian--save-mappings)
+            (message "Created new markdown file: %s"
+                     (file-relative-name md-file org-roam-obsidian-vault-path)))))))
 
    ;; In Obsidian directory
    ((string-prefix-p (expand-file-name org-roam-obsidian-vault-path) file)
+    (message "File is in Obsidian directory")
     (when (file-exists-p file)
       (let ((org-id (org-roam-obsidian--get-mapping-by-md-file file)))
         (if org-id
+            ;; Existing mapping - sync normally
             (let* ((mapping (org-roam-obsidian--get-mapping-by-id org-id))
                    (org-file (alist-get 'org-file mapping)))
+              (message "Found mapping, syncing to: %s" org-file)
               (org-roam-obsidian--sync-md-to-org file org-file)
-              (org-roam-obsidian--save-mappings))
-          ;; No mapping - silently ignore
-          nil))))))
+              (org-roam-obsidian--save-mappings)
+              (message "Sync completed successfully"))
+          ;; No mapping - treat as new file
+          (message "New markdown file detected, creating corresponding org file...")
+          (let* ((title (org-roam-obsidian--extract-title-from-md file))
+                 (org-file (org-roam-obsidian--generate-org-path file))
+                 (org-id (org-id-new)))
+            (org-roam-obsidian--sync-md-to-org file org-file)
+            (org-roam-obsidian--add-mapping org-file file org-id title)
+            (org-roam-obsidian--save-mappings)
+            (message "Created new org file: %s"
+                     (file-relative-name org-file org-roam-obsidian-roam-path)))))))
+
+   (t
+    (message "WARNING: File is not in org-roam or Obsidian directory: %s" file))))
 
 ;;; Periodic Sync Mode
 
@@ -1265,6 +1377,48 @@ FILE should be an absolute path to either an org or md file."
   (org-roam-obsidian--update-sync-mode)
   (message "Periodic sync: %s"
            (if org-roam-obsidian-sync-periodic "enabled" "disabled")))
+
+;;;###autoload
+(defun org-roam-obsidian-diagnose ()
+  "Diagnose file watching and sync configuration."
+  (interactive)
+  (let ((buf (get-buffer-create "*Org-Roam-Obsidian Diagnostics*")))
+    (with-current-buffer buf
+      (erase-buffer)
+      (insert "=== Org-Roam Obsidian Sync Diagnostics ===\n\n")
+
+      (insert "** Configuration **\n")
+      (insert (format "Sync mode enabled: %s\n" org-roam-obsidian-sync-mode))
+      (insert (format "Sync on change: %s\n" org-roam-obsidian-sync-on-change))
+      (insert (format "Sync periodic: %s\n" org-roam-obsidian-sync-periodic))
+      (insert (format "Org-roam path: %s\n" org-roam-obsidian-roam-path))
+      (insert (format "Obsidian vault path: %s\n" org-roam-obsidian-vault-path))
+
+      (insert "\n** Directory Status **\n")
+      (insert (format "Org-roam directory exists: %s\n"
+                      (file-directory-p org-roam-obsidian-roam-path)))
+      (insert (format "Obsidian directory exists: %s\n"
+                      (file-directory-p org-roam-obsidian-vault-path)))
+
+      (insert "\n** File Watchers **\n")
+      (insert (format "Number of active watchers: %d\n"
+                      (length org-roam-obsidian--file-watchers)))
+      (insert (format "Watcher descriptors: %S\n" org-roam-obsidian--file-watchers))
+
+      (insert "\n** Pending Syncs **\n")
+      (insert (format "Number of pending syncs: %d\n"
+                      (hash-table-count org-roam-obsidian--pending-syncs)))
+
+      (insert "\n** File Notify Support **\n")
+      (insert (format "File notify supported: %s\n"
+                      (if (fboundp 'file-notify-add-watch) "yes" "no")))
+      (when (boundp 'file-notify--library)
+        (insert (format "File notify library: %s\n" file-notify--library)))
+
+      (insert "\n** Mappings **\n")
+      (insert (format "Number of file mappings: %d\n"
+                      (hash-table-count org-roam-obsidian--file-map))))
+    (display-buffer buf)))
 
 ;;; Minor Mode
 
