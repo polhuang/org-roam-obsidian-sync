@@ -1151,7 +1151,7 @@ ORG-FILES is list of existing org files for matching."
   "Handle file system change event.
 EVENT format: (DESCRIPTOR ACTION FILE [FILE1])"
   (let* ((action (nth 1 event))
-         (file (nth 2 event)))
+         (file (nth 2 event))))
 
     ;; Filter: only process .org and .md files
     (when (and file
