@@ -2,7 +2,7 @@
 
 ;; Author: Paul Huang
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "27.1") (org "9.3") (org-roam "2.0.0"))
 ;; Keywords: org, org-roam, obsidian, notes, productivity
 ;; URL: https://github.com/polhuang/org-roam-obsidian-sync.el
 
@@ -27,7 +27,6 @@
 (require 'org-roam)
 (require 'org-id)
 (require 'ox-md)
-(require 'dash)
 
 ;;; Custom Variables
 

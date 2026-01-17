@@ -1,0 +1,316 @@
+* org-roam-obsidian-sync
+
+Bidirectional sync between [[https://www.orgroam.com/][Org-roam]] and [[https://obsidian.md/][Obsidian]]. Keeps your notes in sync across both systems, automatically converting between Org-mode and Markdown formats while preserving links, formatting, and metadata.
+
+Supports ~org-roam-dailies~ and is able to merge entries from both sources under a daily entry.
+
+** Features
+
+- *Bidirectional sync* between Org-roam and Obsidian vaults
+- *Link conversion*: Org ID links ~[[id:uuid][title]]~ ↔ Obsidian wikilinks ~[[title]]~
+- *Format conversion*: Org-mode syntax ↔ Markdown syntax
+- *Automatic sync modes*:
+  - On-change sync via file system notifications
+  - Periodic sync at configurable intervals
+- *Daily notes support* with intelligent merge and time-based sorting
+- *Subdirectory preservation* maintains your folder structure
+- *Conflict resolution* with multiple strategies (prompt, newer, prefer org-roam, prefer Obsidian)
+- *File exclusion patterns* to skip specific files
+- *Persistent mappings* remember file relationships across sessions
+
+** Requirements
+
+- Emacs
+- Org-mode
+- [[https://github.com/org-roam/org-roam][Org-roam]]
+
+** Installation
+
+*** Using straight.el
+
+#+begin_src emacs-lisp
+(straight-use-package
+ '(org-roam-obsidian-sync
+   :type git
+   :host github
+   :repo "polhuang/org-roam-obsidian-sync"))
+#+end_src
+
+*** Manual Installation
+
+1. Clone this repository:
+   #+begin_src shell
+   git clone https://github.com/polhuang/org-roam-obsidian-sync.git
+   #+end_src
+
+2. Add to your Emacs configuration:
+   #+begin_src emacs-lisp
+   (add-to-list 'load-path "/path/to/org-roam-obsidian-sync")
+   (require 'org-roam-obsidian-sync)
+   #+end_src
+
+** Configuration
+
+*** Basic Setup
+
+#+begin_src emacs-lisp
+(use-package org-roam-obsidian-sync
+  :after org-roam
+  :custom
+  ;; Set your directories
+  (org-roam-obsidian-vault-path "~/Obsidian/MyVault")
+  (org-roam-obsidian-roam-path "~/org/roam")
+
+  ;; Optional: Enable automatic sync
+  (org-roam-obsidian-sync-on-change t)
+  (org-roam-obsidian-sync-periodic nil)
+
+  ;; Optional: Configure sync interval (in seconds)
+  (org-roam-obsidian-sync-interval 3600)
+
+  ;; Optional: Set conflict resolution strategy
+  ;; Options: 'prompt, 'newer, 'org-roam, 'obsidian
+  (org-roam-obsidian-conflict-resolution 'prompt)
+
+  :config
+  ;; Enable the minor mode
+  (org-roam-obsidian-sync-mode 1))
+#+end_src
+
+** Usage
+
+*** Interactive Commands
+
+| Command                                        | Description                                     |
+|------------------------------------------------+-------------------------------------------------|
+| ~M-x org-roam-obsidian-sync~                   | Perform full bidirectional sync                 |
+| ~M-x org-roam-obsidian-sync-current-file~      | Sync only the current file                      |
+| ~M-x org-roam-obsidian-toggle-on-change-sync~  | Toggle automatic sync on file changes           |
+| ~M-x org-roam-obsidian-toggle-periodic-sync~   | Toggle periodic sync                            |
+| ~M-x org-roam-obsidian-view-mappings~          | View all file mappings                          |
+| ~M-x org-roam-obsidian-reset-mappings~         | Clear all mappings and rescan                   |
+| ~M-x org-roam-obsidian-diagnose~               | Display diagnostic information                  |
+
+*** Workflow Examples
+
+**** Initial Sync
+
+First time syncing your existing notes:
+
+#+begin_src emacs-lisp
+;; 1. Configure paths
+(setq org-roam-obsidian-vault-path "~/Obsidian/MyVault")
+(setq org-roam-obsidian-roam-path "~/org/roam")
+
+;; 2. Run initial sync
+M-x org-roam-obsidian-sync
+#+end_src
+
+The sync will:
+- Match existing files by title
+- Create corresponding files where needed
+- Establish bidirectional mappings
+
+**** Daily Workflow with Automatic Sync
+
+Enable automatic sync for seamless note-taking:
+
+#+begin_src emacs-lisp
+;; Enable automatic sync on file changes
+M-x org-roam-obsidian-toggle-on-change-sync
+
+;; Now any changes in Emacs or Obsidian will auto-sync
+;; Edit notes in either application freely!
+#+end_src
+
+**** Syncing a Single File
+
+When working on a specific note:
+
+#+begin_src emacs-lisp
+;; Open your note in Emacs
+C-x C-f ~/org/roam/my-note.org
+
+;; Edit and save
+C-x C-s
+
+;; Sync just this file
+M-x org-roam-obsidian-sync-current-file
+#+end_src
+
+** How It Works
+
+*** Link Conversion
+
+**** Org → Markdown
+- Org ID links: ~[[id:abc123][My Note]]~ → Wikilinks: ~[[My Note]]~
+- File links: ~[[file:image.png]]~ → ~![](image.png)~
+- External links preserved
+
+**** Markdown → Org
+- Wikilinks: ~[[My Note]]~ → Org ID links: ~[[id:abc123][My Note]]~
+- Requires org-roam database lookup by title
+- Unknown links converted to plain org links
+
+*** Format Conversion
+
+**** Org → Markdown
+- Headers: ~* Heading~ → ~# Heading~
+- Bold: ~*bold*~ → ~**bold**~
+- Italic: ~/italic/~ → ~*italic*~
+- Code blocks: ~#+begin_src lang~ → ~```lang~
+- Lists and other elements converted via ox-md
+
+**** Markdown → Org
+- Headers: ~# Heading~ → ~* Heading~
+- Bold: ~**bold**~ → ~*bold*~
+- Italic: ~*italic*~ → ~/italic/~
+- Code blocks: ~```lang~ → ~#+begin_src lang~
+- Images: ~![alt](path)~ → ~[[file:path][alt]]~
+
+*** Daily Notes Special Handling
+
+Daily notes in the configured dailies folder get special treatment:
+
+- *Time-based merging*: Headings with timestamps (e.g., "9:30 am") are sorted chronologically
+- *Deduplication*: Entries with the same timestamp aren't duplicated
+- *Bidirectional merge*: Changes from both sides are merged intelligently
+- *Format*: Use ~* 9:30 am~ in org, ~## 9:30 am~ in markdown
+
+Example daily note structure:
+
+#+begin_src org
+,#+title: 2024-01-15
+
+,* 9:00 am
+Morning standup notes
+
+,* 2:30 pm
+Afternoon review
+#+end_src
+
+*** Conflict Resolution
+
+When both files modified since last sync:
+
+- ~'prompt~: Ask user which version to keep
+- ~'newer~: Automatically use the most recently modified file
+- ~'org-roam~: Always prefer the org-roam version
+- ~'obsidian~: Always prefer the Obsidian version
+
+*** File Watching
+
+Automatic sync uses ~file-notify~ to watch for changes:
+
+- Recursive directory watching
+- 1-second debounce to avoid rapid re-syncs
+- 2-second ignore window to prevent sync loops
+- Works with external changes (Obsidian app, git, etc.)
+
+** File Structure
+
+*** Mapping Persistence
+
+File mappings are stored in ~org-roam-obsidian-map.el~ in your ~user-emacs-directory~:
+
+#+begin_src emacs-lisp
+(:forward #<hash-table>  ; org-id → file info
+ :reverse #<hash-table>) ; md-file → org-id
+#+end_src
+
+Each mapping contains:
+- org-file path
+- md-file path
+- title
+- last-sync timestamp
+
+*** Subdirectory Structure
+
+Directory structure is preserved during sync:
+
+#+begin_example
+~/org/roam/
+├── projects/
+│   └── work.org
+└── daily/
+    └── 2024-01-15.org
+
+~/Obsidian/MyVault/
+├── projects/
+│   └── work.md
+└── daily/
+    └── 2024-01-15.md
+#+end_example
+
+** Troubleshooting
+
+*** Sync Not Working
+
+1. Check diagnostic information:
+   #+begin_src emacs-lisp
+   M-x org-roam-obsidian-diagnose
+   #+end_src
+
+2. Verify paths are correct:
+   #+begin_src emacs-lisp
+   (file-directory-p org-roam-obsidian-vault-path)  ; should return t
+   (file-directory-p org-roam-obsidian-roam-path)   ; should return t
+   #+end_src
+
+3. Check file watchers are active:
+   #+begin_src emacs-lisp
+   org-roam-obsidian--file-watchers  ; should show active descriptors
+   #+end_src
+
+*** Links Not Converting
+
+- Ensure org-roam database is up to date: ~M-x org-roam-db-sync~
+- Check that nodes exist in database: ~M-x org-roam-node-find~
+- Verify titles match exactly between files
+
+*** Infinite Sync Loops
+
+If you experience repeated syncing:
+
+#+begin_src emacs-lisp
+;; Disable auto-sync temporarily
+(setq org-roam-obsidian-sync-on-change nil)
+(org-roam-obsidian--stop-file-watching)
+
+;; Reset mappings
+M-x org-roam-obsidian-reset-mappings
+
+;; Re-enable with fresh start
+M-x org-roam-obsidian-sync
+(setq org-roam-obsidian-sync-on-change t)
+(org-roam-obsidian--start-file-watching)
+#+end_src
+
+*** Files Not Being Detected
+
+Check exclusion patterns:
+
+#+begin_src emacs-lisp
+;; View current exclusion patterns
+org-roam-obsidian-excluded-patterns
+
+;; Temporarily clear them
+(setq org-roam-obsidian-excluded-patterns nil)
+#+end_src
+
+** Limitations
+
+- YAML frontmatter preservation not yet implemented
+- Attachment/image file copying not yet implemented
+- New subdirectories created after watching starts won't be auto-watched (requires mode restart)
+- Large files may cause Emacs to hang during conversion
+- Absolute paths in mappings reduce portability across machines
+
+** To-do's
+
+- [ ] Implement YAML frontmatter preservation
+- [ ] Allow attachment/image file syncing
+- [ ] Add dry-run mode
+- [ ] Enable sync history/logging
+- [ ] Allow tags sync
+- [ ] Enable selective sync
